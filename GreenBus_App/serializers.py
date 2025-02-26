@@ -1,12 +1,18 @@
 from rest_framework import serializers
 
-from GreenBus_App.models import BusModel, UserModel, TicketModel, PaymentModel
+from GreenBus_App.models import BusModel, UserModel, TicketModel, PaymentModel, CompanyModel
 
 
 class BusSerializer(serializers.ModelSerializer):
     class Meta:
         model=BusModel
         fields='__all__'
+
+class CompanySerializer(serializers.ModelSerializer):
+    class Meta:
+        model=CompanyModel
+        fields='__all__'
+
 
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
