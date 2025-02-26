@@ -1,8 +1,8 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
-from GreenBus_App.views import BusViewSet, UserViewSet, TicketViewSet, PaymentViewSet, SearchBuses, BusCompanyList, \
-    CompanyViewSet
+from GreenBus_App.views import BusViewSet, UserViewSet, TicketViewSet, PaymentViewSet, SearchBuses, bus_company_list, \
+    CompanyViewSet, cancel_ticket
 
 router=DefaultRouter()
 router.register(r'buses',BusViewSet)
@@ -14,5 +14,6 @@ router.register(r'company',CompanyViewSet)
 urlpatterns=[
     path('api/',include(router.urls)),
     path('api/search/', SearchBuses, name="search-api"),
-    path("api/company/<int:company_id>/buses/", BusCompanyList, name="company-buses"),
+    path("api/company/<int:company_id>/buses/", bus_company_list, name="company-buses"),
+    path("cancel_ticket/<int:ticket_id>/", cancel_ticket, name="cancel_ticket"),
 ]

@@ -23,10 +23,11 @@ class CompanyModel(models.Model):
 
 class BusModel(models.Model):
     busNo=models.PositiveIntegerField(unique=True,default=1)
-    busCompany=models.ForeignKey(CompanyModel,on_delete=CASCADE)
+    busCompany=models.ForeignKey("CompanyModel",on_delete=CASCADE)
     availableSeats=ArrayField(models.CharField(max_length=200), blank=True)
     fromWhere=models.CharField(max_length=20)
     toWhere=models.CharField(max_length=20)
+    perSeatPrice=models.PositiveIntegerField(default=500)
     TIME_CHOICES = [
         ("Morning", "9AM"),
         ("Night", "9PM"),
@@ -42,17 +43,17 @@ class BusModel(models.Model):
     def delete(self,*args, **kwargs):
         bus_company=self.busCompany
         super().delete(*args,**kwargs)
-        bus_company.noOfBuses=BusModel.objects.filter(busCompany=bus_company)
+        bus_company.noOfBuses=BusModel.objects.filter(busCompany=bus_company).count()
         self.busCompany.save()
-
 
 class TicketModel(models.Model):
     ticketId=models.IntegerField(unique=True)
-    customerName=models.ForeignKey(UserModel,on_delete=CASCADE)
-    busNo=models.ForeignKey(BusModel,on_delete=CASCADE)
+    customerName=models.ForeignKey("UserModel",on_delete=CASCADE)
+    busNo=models.ForeignKey("BusModel",on_delete=CASCADE)
     seatSelected=ArrayField(models.CharField(max_length=200), blank=True,default=list)
+    ticket_price=models.PositiveIntegerField(default=0,editable=False)
     def __str__(self):
-        return f"Ticket Id-{self.ticketId} Booked By {self.customerName.firstName}"
+        return f"Ticket Id-{self.ticketId} for {self.busNo} Booked By {self.customerName.firstName}"
 
     def validate(self):
         bus=self.busNo
@@ -68,14 +69,24 @@ class TicketModel(models.Model):
                              seat not in self.seatSelected]  # Remove selected seats
             bus.availableSeats=updated_seats
             bus.save()
+        seat_count = len(self.seatSelected)
+        self.ticket_price = seat_count * self.busNo.perSeatPrice
         super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if self.seatSelected:
+            bus = self.busNo
+            bus.availableSeats.extend(self.seatSelected)  # Add seats back
+            bus.availableSeats = list(set(bus.availableSeats))  # Remove duplicates if any
+            bus.save()
+        super().delete(*args, **kwargs)
 
 class PaymentModel(models.Model):
     PAYMENT_CHOICES = [
-        ("Paid", "Successful"),
-        ("Not Paid", "Not Successful"),
+        ("Pending", "Pending"),
+        ("Paid", "Paid"),
+        ("Cancelled", "Cancelled")
     ]
-    customerName=models.ForeignKey(UserModel,on_delete=CASCADE)
-    ticketId=models.ForeignKey(TicketModel,on_delete=CASCADE)
-    paymentStatus=models.CharField(max_length=10,choices=PAYMENT_CHOICES,default="Not Paid")
-
+    customerName=models.ForeignKey("UserModel",on_delete=CASCADE)
+    ticketId=models.ForeignKey("TicketModel",on_delete=CASCADE)
+    paymentStatus=models.CharField(max_length=10,choices=PAYMENT_CHOICES,default="Pending")

@@ -27,7 +27,7 @@ class TicketSerializer(serializers.ModelSerializer):
 
     def get_paymentStatus(self, obj):
         payment = PaymentModel.objects.filter(ticketId=obj).order_by('-id').first()
-        return payment.paymentStatus if payment else "Not Paid"
+        return payment.paymentStatus if payment else "Pending"
 
 class PaymentSerializer(serializers.ModelSerializer):
     class Meta:

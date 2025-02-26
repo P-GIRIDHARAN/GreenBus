@@ -31,14 +31,21 @@ class PaymentViewSet(viewsets.ModelViewSet):
     serializer_class = PaymentSerializer
 @api_view(["GET"])
 def SearchBuses(request):
-    from_location=request.GET.get("fromWhere")
-    to_location=request.GET.get("toWhere")
-    time = request.GET.get("date")
-    buses=BusModel.objects.filter(fromWhere=from_location,toWhere=to_location,date=time)
+    filters = {}
+    if "fromWhere" in request.GET:
+        filters["fromWhere"] = request.GET.get("fromWhere")
+    if "toWhere" in request.GET:
+        filters["toWhere"] = request.GET.get("toWhere")
+    if "date" in request.GET:
+        filters["date"] = request.GET.get("date")
+    if "busCompany" in request.GET:
+        filters["busCompany"]=request.GET.get("busCompany")
+    buses = BusModel.objects.filter(**filters)
     serializer=BusSerializer(buses,many=True)
     return Response(serializer.data)
+
 @api_view(["GET"])
-def BusCompanyList(request, company_id):
+def bus_company_list(request, company_id):
     try:
         company = CompanyModel.objects.get(id=company_id)
     except CompanyModel.DoesNotExist:
@@ -51,3 +58,22 @@ def BusCompanyList(request, company_id):
         "buses": list(buses)
     })
 
+@api_view(["POST"])
+def cancel_ticket(request, ticket_id):
+    try:
+        ticket = TicketModel.objects.get(ticketId=ticket_id)
+    except TicketModel.DoesNotExist:
+        return Response({"error": "Ticket not found"}, status=404)
+    bus = ticket.busNo
+    if ticket.seatSelected:
+        bus.availableSeats = list(set(bus.availableSeats) | set(ticket.seatSelected))  # Add seats back
+        bus.save()
+    try:
+        payment = PaymentModel.objects.get(ticketId=ticket)
+        payment.paymentStatus = "Cancelled"
+        payment.save()
+    except PaymentModel.DoesNotExist:
+        pass  # No payment record, so just proceed
+    ticket.delete()
+
+    return Response({"message": "Ticket cancelled, seats restored successfully."}, status=200)
