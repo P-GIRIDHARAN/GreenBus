@@ -22,29 +22,67 @@ class CompanyModel(models.Model):
         return f"{self.busCompany}"
 
 class BusModel(models.Model):
-    busNo=models.PositiveIntegerField(unique=True,default=1)
-    busCompany=models.ForeignKey("CompanyModel",on_delete=CASCADE)
-    availableSeats=ArrayField(models.CharField(max_length=200), blank=True)
-    fromWhere=models.CharField(max_length=20)
-    toWhere=models.CharField(max_length=20)
-    perSeatPrice=models.PositiveIntegerField(default=500)
-    TIME_CHOICES = [
-        ("Morning", "9AM"),
-        ("Night", "9PM"),
-    ]
-    boardingTime=models.CharField(choices=TIME_CHOICES)
-    date=models.DateField(default=now)
+    busNo = models.PositiveIntegerField(unique=True, default=1)
+    busCompany = models.ForeignKey("CompanyModel", on_delete=CASCADE)
+    totalSeats = models.PositiveIntegerField(default=40)  # Total seats in bus
+    availableSeats = ArrayField(models.PositiveIntegerField(), blank=True, default=list)  # Available seats
+    bookedSeats = ArrayField(models.PositiveIntegerField(), blank=True, default=list)  # Booked seats
+    fromWhere = models.CharField(max_length=20)
+    toWhere = models.CharField(max_length=20)
+    perSeatPrice = models.PositiveIntegerField(default=500)
+    TIME_CHOICES = [("Morning", "9AM"), ("Night", "9PM")]
+    boardingTime = models.CharField(choices=TIME_CHOICES)
+    date = models.DateField(default=now)
+
     def __str__(self):
-        return f"{self.busCompany}"
+        return f"{self.busNo} - {self.busCompany}"
+
     def save(self, *args, **kwargs):
-        super().save(*args,**kwargs)
-        self.busCompany.noOfBuses=BusModel.objects.filter(busCompany=self.busCompany).count()
-        self.busCompany.save()
-    def delete(self,*args, **kwargs):
-        bus_company=self.busCompany
-        super().delete(*args,**kwargs)
-        bus_company.noOfBuses=BusModel.objects.filter(busCompany=bus_company).count()
-        self.busCompany.save()
+        """Initialize available seats when a new bus is created."""
+        if not self.availableSeats:
+            self.availableSeats = list(range(1, self.totalSeats + 1))
+        super().save(*args, **kwargs)
+
+    def update_seat_status(self):
+        """Update available and booked seats based on `RouteModel`."""
+        booked_seats = set()
+        for route in self.routes.all():
+            booked_seats.update(route.bookedSeats)
+
+        self.bookedSeats = list(booked_seats)
+        self.availableSeats = [seat for seat in range(1, self.totalSeats + 1) if seat not in booked_seats]
+        self.save()
+
+
+class RouteModel(models.Model):
+    bus = models.ForeignKey(BusModel, on_delete=CASCADE, related_name="routes")
+    stopName = models.CharField(max_length=50)
+    stopOrder = models.PositiveIntegerField()
+    bookedSeats = ArrayField(models.PositiveIntegerField(), blank=True, default=list)  # Tracks booked seats
+
+    class Meta:
+        ordering = ["stopOrder"]
+
+    def __str__(self):
+        return f"{self.bus.busNo} - {self.stopName}"
+
+    def is_seat_available(self, seat_number):
+        return seat_number not in self.bookedSeats
+
+    def book_seat(self, seat_number):
+        """Book a seat and update `BusModel`."""
+        if not self.is_seat_available(seat_number):
+            raise ValueError(f"Seat {seat_number} is already booked at {self.stopName}.")
+        self.bookedSeats.append(seat_number)
+        self.save()
+        self.bus.update_seat_status()
+
+    def release_seat(self, seat_number):
+        """Release a booked seat and update `BusModel`."""
+        if seat_number in self.bookedSeats:
+            self.bookedSeats.remove(seat_number)
+            self.save()
+            self.bus.update_seat_status()
 
 class TicketModel(models.Model):
     ticketId=models.IntegerField(unique=True)
