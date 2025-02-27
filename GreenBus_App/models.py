@@ -41,18 +41,15 @@ class BusModel(models.Model):
         super().save(*args, **kwargs)
 
     def update_seat_status(self):
-        """Dynamically update available and booked seats per segment."""
         all_seats = set(range(1, self.totalSeats + 1))  # Full seat list
-        booked_seats = set()  # Store booked seats
-        available_seats = all_seats.copy()  # Initially assume all are available
+        booked_seats = set()
+        available_seats = all_seats.copy()
 
-        # Loop through each route stop and track booked seats correctly
         for route in self.routes.all().order_by("stopOrder"):
             for seat in route.bookedSeats:
-                booked_seats.add(seat)  # Add to booked list
-                available_seats.discard(seat)  # Remove from available seats
+                booked_seats.add(seat)
+                available_seats.discard(seat)
 
-        # Ensure bookedSeats and availableSeats are correctly updated
         self.bookedSeats = sorted(booked_seats)
         self.availableSeats = sorted(available_seats)
 
@@ -121,7 +118,6 @@ class TicketModel(models.Model):
         if from_index >= to_index:
             raise ValidationError("Invalid journey sequence.")
 
-        # Check seat availability for the segment
         for stop in route_stops[from_index:to_index]:
             for seat in self.seatNumbers:
                 if seat in stop.bookedSeats:
@@ -141,11 +137,9 @@ class TicketModel(models.Model):
         self.ticketPrice = len(self.seatNumbers) * self.bus.perSeatPrice
         super().save(*args, **kwargs)
 
-        # Update bus available/booked seats
         self.bus.update_seat_status()
 
     def delete(self, *args, **kwargs):
-        """Release seats for only the booked segment."""
         route_stops = self.bus.routes.order_by("stopOrder")
 
         from_index = next(i for i, stop in enumerate(route_stops) if stop.stopName == self.fromStop)
@@ -174,18 +168,12 @@ class PaymentModel(models.Model):
     paymentStatus = models.CharField(max_length=10, choices=PAYMENT_CHOICES, default="Pending")
 
     def save(self, *args, **kwargs):
-        """
-        When payment is cancelled, release the booked seats.
-        """
         if self.paymentStatus == "Cancelled":
             self.release_booked_seats()
 
         super().save(*args, **kwargs)
 
     def release_booked_seats(self):
-        """
-        Releases seats when a payment is cancelled.
-        """
         ticket = self.ticketId
         bus = ticket.bus
         route_stops = bus.routes.order_by("stopOrder")
@@ -198,8 +186,6 @@ class PaymentModel(models.Model):
                 if seat in stop.bookedSeats:
                     stop.bookedSeats.remove(seat)
                     stop.save()
-
-        # Remove seats from bookedSeats and add them to availableSeats
         bus.bookedSeats = [seat for seat in bus.bookedSeats if seat not in ticket.seatNumbers]
         bus.availableSeats.extend(ticket.seatNumbers)
         bus.availableSeats.sort()  # Keep seats in ascending order

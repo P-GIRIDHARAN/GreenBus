@@ -2,7 +2,7 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from GreenBus_App.views import BusViewSet, UserViewSet, TicketViewSet, PaymentViewSet, SearchBuses, bus_company_list, \
-    CompanyViewSet, cancel_ticket, book_seat, RouteViewSet
+    CompanyViewSet, cancel_ticket, book_seat, RouteViewSet, get_bus_routes
 
 router=DefaultRouter()
 router.register(r'buses',BusViewSet)
@@ -17,4 +17,6 @@ urlpatterns=[
     path("api/company/<int:company_id>/buses/", bus_company_list, name="company-buses"),
     path("api/cancel-ticket/<int:ticket_id>/", cancel_ticket, name="cancel-ticket"),
     path("api/book-seat/<int:bus_id>/", book_seat, name="book-seat"),
+    path("routes/", get_bus_routes, name="get-bus-routes"),
+
 ]

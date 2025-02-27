@@ -54,7 +54,6 @@ def SearchBuses(request):
         route_stops = bus.routes.order_by("stopOrder")
         stop_names = [stop.stopName for stop in route_stops]
 
-        # Ensure both stops exist and are in the correct order
         if from_stop in stop_names and to_stop in stop_names:
             from_index = stop_names.index(from_stop)
             to_index = stop_names.index(to_stop)
@@ -123,39 +122,6 @@ def book_seat(request, bus_id):
     release_seat_at_stop(bus, seat_number, to_stop)
 
     return Response({"success": f"Seat {seat_number} booked from {from_stop} to {to_stop}."}, status=status.HTTP_200_OK)
-@api_view(["POST"])
-def cancel_ticket(request, ticket_id):
-    """
-    Cancels a ticket and releases booked seats back to available seats.
-    """
-    try:
-        ticket = TicketModel.objects.get(ticketId=ticket_id)
-    except TicketModel.DoesNotExist:
-        return Response({"error": "Ticket not found"}, status=status.HTTP_404_NOT_FOUND)
-
-    if ticket.paymentStatus == "Cancelled":
-        return Response({"message": "Ticket is already cancelled"}, status=status.HTTP_400_BAD_REQUEST)
-
-    # Get the associated bus
-    bus = ticket.bus
-
-    # Release seats
-    for seat in ticket.seatNumbers:
-        if seat in bus.bookedSeats:
-            bus.bookedSeats.remove(seat)
-            bus.availableSeats.append(seat)
-
-    # Sort available seats in ascending order
-    bus.availableSeats.sort()
-
-    # Save the updates to the bus
-    bus.save(update_fields=["bookedSeats", "availableSeats"])
-
-    # Update ticket status
-    ticket.paymentStatus = "Cancelled"
-    ticket.save(update_fields=["paymentStatus"])
-
-    return Response({"message": "Ticket cancelled successfully"}, status=status.HTTP_200_OK)
 
 def release_seat_at_stop(bus, seat_number, stop_name):
     route_stop = bus.routes.filter(stopName=stop_name).first()
@@ -177,23 +143,53 @@ def release_seat_at_stop(bus, seat_number, stop_name):
 
 @api_view(["POST"])
 def cancel_ticket(request, ticket_id):
+    """
+    Cancels a ticket, updates payment status, and releases booked seats.
+    """
     try:
+        # Fetch the ticket
         ticket = TicketModel.objects.get(ticketId=ticket_id)
-        payment = PaymentModel.objects.filter(ticketId=ticket).order_by('-id').first()
+
+        # Fetch the latest payment record for the ticket
+        payment = PaymentModel.objects.filter(ticketId=ticket).order_by("-id").first()
         if not payment:
-            return Response({"error": "No payment record found for this ticket."}, status=400)
+            return Response({"error": "No payment record found for this ticket."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Check if the payment is already cancelled
+        if payment.paymentStatus == "Cancelled":
+            return Response({"message": "Ticket is already cancelled."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Update payment status
         payment.paymentStatus = "Cancelled"
         payment.save(update_fields=["paymentStatus"])
+
+        # Fetch the associated bus
         bus = ticket.bus
+
+        # Release booked seats at stops
         for seat in ticket.seatNumbers:
-            if seat in bus.bookedSeats:
-                bus.bookedSeats.remove(seat)
-                bus.availableSeats.append(seat)
+            release_seat_at_stop(bus, seat, ticket.toStop)  # FIX: Replaced dropoffStop with toStop
+
+        # Save the updated bus seat status
         bus.availableSeats.sort()
         bus.save(update_fields=["availableSeats", "bookedSeats"])
-        return Response({"message": "Ticket and payment cancelled, seats released."}, status=200)
+
+        return Response({"message": "Ticket and payment cancelled, seats released."}, status=status.HTTP_200_OK)
+
     except TicketModel.DoesNotExist:
-        return Response({"error": "Ticket not found."}, status=404)
+        return Response({"error": "Ticket not found."}, status=status.HTTP_404_NOT_FOUND)
 
     except Exception as e:
-        return Response({"error": str(e)}, status=500)
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(["GET"])
+def get_bus_routes(request):
+    bus_id = request.GET.get("bus")
+    if not bus_id:
+        return Response({"error": "Bus ID is required"}, status=400)
+
+    routes = RouteModel.objects.filter(bus_id=bus_id).order_by("stopOrder")
+    serializer = RouteSerializer(routes, many=True)
+
+    return Response(serializer.data, status=200)

@@ -11,9 +11,15 @@ class BusSerializer(serializers.ModelSerializer):
         fields='__all__'
 
 class CompanySerializer(serializers.ModelSerializer):
+    noOfBuses = serializers.SerializerMethodField()
+
     class Meta:
-        model=CompanyModel
-        fields='__all__'
+        model = CompanyModel
+        fields = ["id", "busCompany", "noOfBuses"]
+
+    def get_noOfBuses(self, obj):
+        return BusModel.objects.filter(busCompany=obj).count()
+
 
 
 class UserSerializer(serializers.ModelSerializer):
