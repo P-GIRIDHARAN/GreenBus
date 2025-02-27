@@ -34,9 +34,6 @@ class BusModel(models.Model):
     boardingTime = models.CharField(choices=TIME_CHOICES)
     date = models.DateField(default=now)
 
-    def __str__(self):
-        return f"{self.busNo} - {self.busCompany}"
-
     def save(self, *args, **kwargs):
         """Initialize available seats when a new bus is created."""
         if not self.availableSeats:
@@ -44,13 +41,21 @@ class BusModel(models.Model):
         super().save(*args, **kwargs)
 
     def update_seat_status(self):
-        """Update available and booked seats based on `RouteModel`."""
-        booked_seats = set()
-        for route in self.routes.all():
-            booked_seats.update(route.bookedSeats)
+        """Dynamically update available and booked seats per segment."""
+        all_seats = set(range(1, self.totalSeats + 1))  # Full seat list
+        booked_seats = set()  # Store booked seats
+        available_seats = all_seats.copy()  # Initially assume all are available
 
-        self.bookedSeats = list(booked_seats)
-        self.availableSeats = [seat for seat in range(1, self.totalSeats + 1) if seat not in booked_seats]
+        # Loop through each route stop and track booked seats correctly
+        for route in self.routes.all().order_by("stopOrder"):
+            for seat in route.bookedSeats:
+                booked_seats.add(seat)  # Add to booked list
+                available_seats.discard(seat)  # Remove from available seats
+
+        # Ensure bookedSeats and availableSeats are correctly updated
+        self.bookedSeats = sorted(booked_seats)
+        self.availableSeats = sorted(available_seats)
+
         self.save()
 
 
@@ -69,55 +74,94 @@ class RouteModel(models.Model):
     def is_seat_available(self, seat_number):
         return seat_number not in self.bookedSeats
 
-    def book_seat(self, seat_number):
-        """Book a seat and update `BusModel`."""
-        if not self.is_seat_available(seat_number):
-            raise ValueError(f"Seat {seat_number} is already booked at {self.stopName}.")
-        self.bookedSeats.append(seat_number)
-        self.save()
-        self.bus.update_seat_status()
+    def book_seat(self, seat_number, from_stop, to_stop):
+        bus = self.bus
+        route_stops = list(bus.routes.order_by("stopOrder"))
 
-    def release_seat(self, seat_number):
-        """Release a booked seat and update `BusModel`."""
-        if seat_number in self.bookedSeats:
-            self.bookedSeats.remove(seat_number)
-            self.save()
-            self.bus.update_seat_status()
+        from_index = next((i for i, stop in enumerate(route_stops) if stop.stopName == from_stop), None)
+        to_index = next((i for i, stop in enumerate(route_stops) if stop.stopName == to_stop), None)
+
+        if from_index is None or to_index is None or from_index >= to_index:
+            raise ValueError("Invalid stop selection.")
+
+        for stop in route_stops[from_index:to_index]:
+            if seat_number in stop.bookedSeats:
+                raise ValueError(f"Seat {seat_number} is already booked on this segment.")
+
+        for stop in route_stops[from_index:to_index]:
+            stop.bookedSeats.append(seat_number)
+            stop.save()
+
+        bus.update_seat_status()
+
 
 class TicketModel(models.Model):
-    ticketId=models.IntegerField(unique=True)
-    customerName=models.ForeignKey("UserModel",on_delete=CASCADE)
-    busNo=models.ForeignKey("BusModel",on_delete=CASCADE)
-    seatSelected=ArrayField(models.CharField(max_length=200), blank=True,default=list)
-    ticket_price=models.PositiveIntegerField(default=0,editable=False)
-    def __str__(self):
-        return f"Ticket Id-{self.ticketId} for {self.busNo} Booked By {self.customerName.firstName}"
+    ticketId = models.AutoField(primary_key=True)
+    customer = models.ForeignKey("UserModel", on_delete=CASCADE)
+    bus = models.ForeignKey("BusModel", on_delete=CASCADE)
+    seatNumbers = ArrayField(models.PositiveIntegerField(), blank=True, default=list)
+    fromStop = models.CharField(max_length=50)
+    toStop = models.CharField(max_length=50)
+    ticketPrice = models.PositiveIntegerField(default=0, editable=False)
+    bookingDate = models.DateField(auto_now_add=True)
 
-    def validate(self):
-        bus=self.busNo
-        if self.seatSelected ==[]:
-                raise(ValidationError("Please select any seat"))
-        if not set(self.seatSelected).issubset(set(bus.availableSeats)):
-            raise(ValidationError("One or more seats selected not available in Bus"))
+    def __str__(self):
+        return f"Ticket {self.ticketId} - Bus {self.bus.busNo} - Seats {self.seatNumbers}"
+
+    def validate_booking(self):
+        route_stops = self.bus.routes.order_by("stopOrder")
+        stop_names = [stop.stopName for stop in route_stops]
+
+        if self.fromStop not in stop_names or self.toStop not in stop_names:
+            raise ValidationError("Invalid stops selected.")
+
+        from_index = stop_names.index(self.fromStop)
+        to_index = stop_names.index(self.toStop)
+
+        if from_index >= to_index:
+            raise ValidationError("Invalid journey sequence.")
+
+        # Check seat availability for the segment
+        for stop in route_stops[from_index:to_index]:
+            for seat in self.seatNumbers:
+                if seat in stop.bookedSeats:
+                    raise ValidationError(f"Seat {seat} is already booked on this route.")
+
     def save(self, *args, **kwargs):
-        self.validate()
-        bus = self.busNo
-        if self.seatSelected and isinstance(bus.availableSeats, list):
-            updated_seats = [seat for seat in bus.availableSeats if
-                             seat not in self.seatSelected]  # Remove selected seats
-            bus.availableSeats=updated_seats
-            bus.save()
-        seat_count = len(self.seatSelected)
-        self.ticket_price = seat_count * self.busNo.perSeatPrice
+        self.validate_booking()
+        route_stops = self.bus.routes.order_by("stopOrder")
+        from_index = next(i for i, stop in enumerate(route_stops) if stop.stopName == self.fromStop)
+        to_index = next(i for i, stop in enumerate(route_stops) if stop.stopName == self.toStop)
+
+        for stop in route_stops[from_index:to_index]:
+            for seat in self.seatNumbers:
+                stop.bookedSeats.append(seat)
+                stop.save()
+
+        self.ticketPrice = len(self.seatNumbers) * self.bus.perSeatPrice
         super().save(*args, **kwargs)
 
+        # Update bus available/booked seats
+        self.bus.update_seat_status()
+
     def delete(self, *args, **kwargs):
-        if self.seatSelected:
-            bus = self.busNo
-            bus.availableSeats.extend(self.seatSelected)  # Add seats back
-            bus.availableSeats = list(set(bus.availableSeats))  # Remove duplicates if any
-            bus.save()
+        """Release seats for only the booked segment."""
+        route_stops = self.bus.routes.order_by("stopOrder")
+
+        from_index = next(i for i, stop in enumerate(route_stops) if stop.stopName == self.fromStop)
+        to_index = next(i for i, stop in enumerate(route_stops) if stop.stopName == self.toStop)
+
+        for stop in route_stops[from_index:to_index]:
+            for seat in self.seatNumbers:
+                if seat in stop.bookedSeats:
+                    stop.bookedSeats.remove(seat)
+                    stop.save()
+
         super().delete(*args, **kwargs)
+
+        # Update bus available seats after deletion
+        self.bus.update_seat_status()
+
 
 class PaymentModel(models.Model):
     PAYMENT_CHOICES = [
@@ -125,6 +169,38 @@ class PaymentModel(models.Model):
         ("Paid", "Paid"),
         ("Cancelled", "Cancelled")
     ]
-    customerName=models.ForeignKey("UserModel",on_delete=CASCADE)
-    ticketId=models.ForeignKey("TicketModel",on_delete=CASCADE)
-    paymentStatus=models.CharField(max_length=10,choices=PAYMENT_CHOICES,default="Pending")
+    customerName = models.ForeignKey("UserModel", on_delete=CASCADE)
+    ticketId = models.ForeignKey("TicketModel", on_delete=CASCADE)
+    paymentStatus = models.CharField(max_length=10, choices=PAYMENT_CHOICES, default="Pending")
+
+    def save(self, *args, **kwargs):
+        """
+        When payment is cancelled, release the booked seats.
+        """
+        if self.paymentStatus == "Cancelled":
+            self.release_booked_seats()
+
+        super().save(*args, **kwargs)
+
+    def release_booked_seats(self):
+        """
+        Releases seats when a payment is cancelled.
+        """
+        ticket = self.ticketId
+        bus = ticket.bus
+        route_stops = bus.routes.order_by("stopOrder")
+
+        from_index = next(i for i, stop in enumerate(route_stops) if stop.stopName == ticket.fromStop)
+        to_index = next(i for i, stop in enumerate(route_stops) if stop.stopName == ticket.toStop)
+
+        for stop in route_stops[from_index:to_index]:
+            for seat in ticket.seatNumbers:
+                if seat in stop.bookedSeats:
+                    stop.bookedSeats.remove(seat)
+                    stop.save()
+
+        # Remove seats from bookedSeats and add them to availableSeats
+        bus.bookedSeats = [seat for seat in bus.bookedSeats if seat not in ticket.seatNumbers]
+        bus.availableSeats.extend(ticket.seatNumbers)
+        bus.availableSeats.sort()  # Keep seats in ascending order
+        bus.save(update_fields=["bookedSeats", "availableSeats"])

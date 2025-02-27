@@ -34,43 +34,41 @@ class RouteViewSet(viewsets.ModelViewSet):
     queryset =RouteModel.objects.all()
     serializer_class = RouteSerializer
 
-
 @api_view(["GET"])
 def SearchBuses(request):
-    """
-    Searches for buses that pass through the requested `fromWhere` and `toWhere` stops.
-    """
+
     from_stop = request.GET.get("fromWhere")
     to_stop = request.GET.get("toWhere")
     date = request.GET.get("date")
     bus_company = request.GET.get("busCompany")
 
-    # Query buses that have the requested stops in their route
     buses = BusModel.objects.all()
-
-    if from_stop:
-        buses = buses.filter(routes__stopName=from_stop)
-
-    if to_stop:
-        buses = buses.filter(routes__stopName=to_stop)
-
     if date:
         buses = buses.filter(date=date)
-
     if bus_company:
         buses = buses.filter(busCompany=bus_company)
 
-    # Ensure the bus has `from_stop` before `to_stop` in its route order
     valid_buses = []
+
     for bus in buses.distinct():
         route_stops = bus.routes.order_by("stopOrder")
         stop_names = [stop.stopName for stop in route_stops]
 
+        # Ensure both stops exist and are in the correct order
         if from_stop in stop_names and to_stop in stop_names:
             from_index = stop_names.index(from_stop)
             to_index = stop_names.index(to_stop)
 
             if from_index < to_index:
+                booked_seats = set()
+                all_seats = set(range(1, bus.totalSeats + 1))
+
+                for stop in route_stops[from_index:to_index]:
+                    booked_seats.update(stop.bookedSeats)
+                available_seats =sorted( all_seats - booked_seats)
+                bus.bookedSeats = list(booked_seats)
+                bus.availableSeats = list(available_seats)
+
                 valid_buses.append(bus)
 
     serializer = BusSerializer(valid_buses, many=True)
@@ -91,85 +89,111 @@ def bus_company_list(request, company_id):
         "buses": list(buses)
     })
 
-
-@api_view(["POST","GET"])
-def book_seat(request):
-    """
-    Book a seat from Stop A to Stop B.
-    """
-    bus_id = request.data.get("bus_id")
+@api_view(["POST"])
+def book_seat(request, bus_id):
     seat_number = int(request.data.get("seat_number"))
     from_stop = request.data.get("from_stop")
     to_stop = request.data.get("to_stop")
 
-    # Get the bus and route
     bus = get_object_or_404(BusModel, id=bus_id)
     route_stops = bus.routes.order_by("stopOrder")
 
-    # Get stop indexes
     from_index = next((i for i, stop in enumerate(route_stops) if stop.stopName == from_stop), None)
     to_index = next((i for i, stop in enumerate(route_stops) if stop.stopName == to_stop), None)
 
     if from_index is None or to_index is None or from_index >= to_index:
         return Response({"error": "Invalid stops selected."}, status=status.HTTP_400_BAD_REQUEST)
 
-    # Check seat availability
     for stop in route_stops[from_index:to_index]:
         if seat_number in stop.bookedSeats:
-            return Response({"error": "Seat already booked on this route."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": f"Seat {seat_number} is already booked on this route."}, status=status.HTTP_400_BAD_REQUEST)
 
-    # Book seat
     for stop in route_stops[from_index:to_index]:
-        stop.book_seat(seat_number)
+        stop.bookedSeats.append(seat_number)
+        stop.save()
+
+    if seat_number in bus.availableSeats:
+        bus.availableSeats.remove(seat_number)
+
+    if seat_number not in bus.bookedSeats:
+        bus.bookedSeats.append(seat_number)
+
+    bus.save()
+
+    release_seat_at_stop(bus, seat_number, to_stop)
 
     return Response({"success": f"Seat {seat_number} booked from {from_stop} to {to_stop}."}, status=status.HTTP_200_OK)
-
-
 @api_view(["POST"])
-def release_seat(request):
+def cancel_ticket(request, ticket_id):
     """
-    Release a booked seat from Stop A to Stop B.
+    Cancels a ticket and releases booked seats back to available seats.
     """
-    bus_id = request.data.get("bus_id")
-    seat_number = int(request.data.get("seat_number"))
-    from_stop = request.data.get("from_stop")
-    to_stop = request.data.get("to_stop")
+    try:
+        ticket = TicketModel.objects.get(ticketId=ticket_id)
+    except TicketModel.DoesNotExist:
+        return Response({"error": "Ticket not found"}, status=status.HTTP_404_NOT_FOUND)
 
-    # Get the bus and route
-    bus = get_object_or_404(BusModel, id=bus_id)
-    route_stops = bus.routes.order_by("stopOrder")
+    if ticket.paymentStatus == "Cancelled":
+        return Response({"message": "Ticket is already cancelled"}, status=status.HTTP_400_BAD_REQUEST)
 
-    # Get stop indexes
-    from_index = next((i for i, stop in enumerate(route_stops) if stop.stopName == from_stop), None)
-    to_index = next((i for i, stop in enumerate(route_stops) if stop.stopName == to_stop), None)
+    # Get the associated bus
+    bus = ticket.bus
 
-    if from_index is None or to_index is None or from_index >= to_index:
-        return Response({"error": "Invalid stops selected."}, status=status.HTTP_400_BAD_REQUEST)
+    # Release seats
+    for seat in ticket.seatNumbers:
+        if seat in bus.bookedSeats:
+            bus.bookedSeats.remove(seat)
+            bus.availableSeats.append(seat)
 
-    # Release seat
-    for stop in route_stops[from_index:to_index]:
-        stop.release_seat(seat_number)
+    # Sort available seats in ascending order
+    bus.availableSeats.sort()
 
-    return Response({"success": f"Seat {seat_number} released from {from_stop} to {to_stop}."},
-                    status=status.HTTP_200_OK)
+    # Save the updates to the bus
+    bus.save(update_fields=["bookedSeats", "availableSeats"])
+
+    # Update ticket status
+    ticket.paymentStatus = "Cancelled"
+    ticket.save(update_fields=["paymentStatus"])
+
+    return Response({"message": "Ticket cancelled successfully"}, status=status.HTTP_200_OK)
+
+def release_seat_at_stop(bus, seat_number, stop_name):
+    route_stop = bus.routes.filter(stopName=stop_name).first()
+    if route_stop and seat_number in route_stop.bookedSeats:
+        route_stop.bookedSeats.remove(seat_number)
+        route_stop.save()
+    upcoming_stops = bus.routes.filter(stopOrder__gt=route_stop.stopOrder)
+    seat_still_booked = any(seat_number in stop.bookedSeats for stop in upcoming_stops)
+
+    if not seat_still_booked:
+        if seat_number not in bus.availableSeats:
+            bus.availableSeats.append(seat_number)
+
+        if seat_number in bus.bookedSeats:
+            bus.bookedSeats.remove(seat_number)
+
+    bus.save()
 
 
 @api_view(["POST"])
 def cancel_ticket(request, ticket_id):
     try:
         ticket = TicketModel.objects.get(ticketId=ticket_id)
-    except TicketModel.DoesNotExist:
-        return Response({"error": "Ticket not found"}, status=404)
-    bus = ticket.busNo
-    if ticket.seatSelected:
-        bus.availableSeats = list(set(bus.availableSeats) | set(ticket.seatSelected))  # Add seats back
-        bus.save()
-    try:
-        payment = PaymentModel.objects.get(ticketId=ticket)
+        payment = PaymentModel.objects.filter(ticketId=ticket).order_by('-id').first()
+        if not payment:
+            return Response({"error": "No payment record found for this ticket."}, status=400)
         payment.paymentStatus = "Cancelled"
-        payment.save()
-    except PaymentModel.DoesNotExist:
-        pass
-    ticket.delete()
+        payment.save(update_fields=["paymentStatus"])
+        bus = ticket.bus
+        for seat in ticket.seatNumbers:
+            if seat in bus.bookedSeats:
+                bus.bookedSeats.remove(seat)
+                bus.availableSeats.append(seat)
+        bus.availableSeats.sort()
+        bus.save(update_fields=["availableSeats", "bookedSeats"])
+        return Response({"message": "Ticket and payment cancelled, seats released."}, status=200)
+    except TicketModel.DoesNotExist:
+        return Response({"error": "Ticket not found."}, status=404)
 
-    return Response({"message": "Ticket cancelled, seats restored successfully."}, status=200)
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)

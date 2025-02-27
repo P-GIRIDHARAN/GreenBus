@@ -1,3 +1,5 @@
+from datetime import date
+
 from rest_framework import serializers
 
 from GreenBus_App.models import BusModel, UserModel, TicketModel, PaymentModel, CompanyModel, RouteModel
@@ -24,14 +26,21 @@ class RouteSerializer(serializers.ModelSerializer):
         fields='__all__'
 class TicketSerializer(serializers.ModelSerializer):
     paymentStatus = serializers.SerializerMethodField()
+
     class Meta:
-        model=TicketModel
-        fields='__all__'
+        model = TicketModel
+        fields = '__all__'
 
     def get_paymentStatus(self, obj):
-        payment = PaymentModel.objects.filter(ticketId=obj).order_by('-id').first()
-        return payment.paymentStatus if payment else "Pending"
+        # Ensure we filter by the correct ticket reference
+        payment = PaymentModel.objects.filter(ticketId=obj.ticketId).order_by('-id').first()
+        return payment.paymentStatus if payment and payment.paymentStatus else "Pending"
 
+    def validate_bookingDate(self, value):
+        """Ensure bookingDate is not in the past"""
+        if value < date.today():
+            raise serializers.ValidationError("You cannot book tickets for past dates.")
+        return value
 class PaymentSerializer(serializers.ModelSerializer):
     class Meta:
         model=PaymentModel
