@@ -1,4 +1,4 @@
-from django.contrib.auth.models import AbstractUser, Group, Permission
+from django.contrib.auth.models import AbstractUser, Group, Permission, User
 from django.contrib.postgres.fields import ArrayField
 from django.db import models
 from django.db.models import CASCADE
@@ -19,13 +19,11 @@ class CustomUser(AbstractUser):
     def __str__(self):
         return self.username
 class UserModel(models.Model):
-    user = models.OneToOneField(CustomUser, on_delete=CASCADE, null=True, blank=True)
-    customerId = models.CharField(max_length=20, unique=True)
-    age = models.PositiveIntegerField()
-    phone_number = models.CharField(max_length=15)
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="profile",null=True,blank=True)  # Use related_name="profile"
+    is_customer = models.BooleanField(default=True)
 
     def __str__(self):
-        return f"{self.user.first_name} {self.user.last_name}" if self.user else "Anonymous"
+        return self.user.username
 
 
 class CompanyModel(models.Model):
@@ -42,6 +40,7 @@ class BusModel(models.Model):
     totalSeats = models.PositiveIntegerField(default=40)
     availableSeats = ArrayField(models.PositiveIntegerField(), blank=True, default=list)
     bookedSeats = ArrayField(models.PositiveIntegerField(), blank=True, default=list)
+    blockedSeats = ArrayField(models.PositiveIntegerField(), blank=True, default=list)
     fromWhere = models.CharField(max_length=20)
     toWhere = models.CharField(max_length=20)
     perSeatPrice = models.PositiveIntegerField(default=500)
@@ -50,23 +49,31 @@ class BusModel(models.Model):
     date = models.DateField(default=now)
 
     def save(self, *args, **kwargs):
-        if not self.availableSeats:
-            self.availableSeats = list(range(1, self.totalSeats + 1))
+        all_seats = set(range(1, self.totalSeats + 1))
+
+        # Ensure bookedSeats and blockedSeats are not None before converting to sets
+        booked_seats = set(self.bookedSeats or [])
+        blocked_seats = set(self.blockedSeats or [])
+
+        # Ensure there is no invalid seat number
+        invalid_seats = booked_seats | blocked_seats - all_seats
+        if invalid_seats:
+            raise ValidationError(f"Invalid seat numbers found: {invalid_seats}")
+
+        self.availableSeats = sorted(all_seats - booked_seats - blocked_seats)
+
         super().save(*args, **kwargs)
 
     def update_seat_status(self):
         all_seats = set(range(1, self.totalSeats + 1))
-        booked_seats = set()
-        available_seats = all_seats.copy()
+        booked_seats = set(self.bookedSeats)  # Convert to set
+        blocked_seats = set(self.blockedSeats)  # Convert to set
 
-        for route in self.routes.all().order_by("stopOrder"):
-            for seat in route.bookedSeats:
-                booked_seats.add(seat)
-                available_seats.discard(seat)
+        available_seats = all_seats - booked_seats - blocked_seats  # Ensure correct set operations
 
-        self.bookedSeats = sorted(booked_seats)
-        self.availableSeats = sorted(available_seats)
-        self.save()
+        self.bookedSeats = sorted(booked_seats)  # Store sorted list
+        self.availableSeats = sorted(available_seats)  # Store sorted list
+        self.save(update_fields=["bookedSeats", "availableSeats"])
 
 
 class RouteModel(models.Model):
@@ -74,10 +81,8 @@ class RouteModel(models.Model):
     stopName = models.CharField(max_length=50)
     stopOrder = models.PositiveIntegerField()
     bookedSeats = ArrayField(models.PositiveIntegerField(), blank=True, default=list)
-
     class Meta:
         ordering = ["stopOrder"]
-
     def __str__(self):
         return f"{self.bus.busNo} - {self.stopName}"
 

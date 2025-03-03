@@ -8,8 +8,11 @@ from GreenBus_App.models import BusModel, UserModel, TicketModel, PaymentModel, 
 
 class BusSerializer(serializers.ModelSerializer):
     class Meta:
-        model=BusModel
-        fields='__all__'
+        model = BusModel
+        fields = [
+            'id', 'busNo','busCompany', 'totalSeats', 'availableSeats', 'bookedSeats', 'blockedSeats',
+            'fromWhere', 'toWhere', 'perSeatPrice', 'boardingTime', 'date'
+        ]
 
 class CompanySerializer(serializers.ModelSerializer):
     noOfBuses = serializers.SerializerMethodField()
@@ -24,11 +27,11 @@ class CompanySerializer(serializers.ModelSerializer):
 
 User = get_user_model()
 class UserSerializer(serializers.ModelSerializer):
-    username = serializers.CharField(source="user.username", read_only=True)  # Access from CustomUser
-
     class Meta:
-        model = UserModel  # Corrected to UserModel
-        fields = ["id", "username", "customerId", "age", "phone_number"]
+        model = User
+        fields = ['id', 'username', 'email', 'password']
+        extra_kwargs = {"password": {"write_only": True}}
+
 
 class RouteSerializer(serializers.ModelSerializer):
     class Meta:
