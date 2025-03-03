@@ -1,10 +1,12 @@
-from django.http import Http404, JsonResponse
-from django.shortcuts import render, get_object_or_404
+from django.contrib.auth import authenticate, get_user_model
+from django.contrib.auth.hashers import make_password
+from django.http import JsonResponse
+from django.shortcuts import get_object_or_404
 from rest_framework import viewsets, status
-from rest_framework.decorators import api_view
+from rest_framework.authtoken.models import Token
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.utils import json
-from tutorial.quickstart.views import UserViewSet
 
 from GreenBus_App.models import BusModel, UserModel, TicketModel, PaymentModel, CompanyModel, RouteModel
 from GreenBus_App.serializers import BusSerializer, UserSerializer, TicketSerializer, PaymentSerializer, \
@@ -12,31 +14,172 @@ from GreenBus_App.serializers import BusSerializer, UserSerializer, TicketSerial
 
 
 class CompanyViewSet(viewsets.ModelViewSet):
-    queryset =CompanyModel.objects.all()
+    queryset = CompanyModel.objects.all()
     serializer_class = CompanySerializer
 
+
 class BusViewSet(viewsets.ModelViewSet):
-    queryset =BusModel.objects.all()
+    queryset = BusModel.objects.all()
     serializer_class = BusSerializer
 
+
 class UserViewSet(viewsets.ModelViewSet):
-    queryset =UserModel.objects.all()
+    queryset = UserModel.objects.all()
     serializer_class = UserSerializer
 
+
 class TicketViewSet(viewsets.ModelViewSet):
-    queryset =TicketModel.objects.all()
+    queryset = TicketModel.objects.all()
     serializer_class = TicketSerializer
 
+
 class PaymentViewSet(viewsets.ModelViewSet):
-    queryset =PaymentModel.objects.all()
+    queryset = PaymentModel.objects.all()
     serializer_class = PaymentSerializer
+
+
 class RouteViewSet(viewsets.ModelViewSet):
-    queryset =RouteModel.objects.all()
+    queryset = RouteModel.objects.all()
     serializer_class = RouteSerializer
+
+User = get_user_model()
+
+@api_view(["POST"])
+def register_user(request):
+    try:
+        data = request.data
+        data["password"] = make_password(data["password"])  # Hash the password
+
+        serializer = UserSerializer(data=data)
+        if serializer.is_valid():
+            user = serializer.save()
+            return Response(
+                {
+                    "message": "User registered successfully",
+                    "user": serializer.data
+                },
+                status=status.HTTP_201_CREATED
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+@api_view(["POST"])
+def login_view(request):
+    username = request.data.get("username")
+    password = request.data.get("password")
+
+    user = authenticate(username=username, password=password)
+    if user:
+        token, _ = Token.objects.get_or_create(user=user)
+        return Response({"token": token.key, "user_id": user.id, "is_customer": user.is_customer},
+                        status=status.HTTP_200_OK)
+
+    return Response({"error": "Invalid credentials"}, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(["GET"])
+def search_buses(request):
+    from_stop = request.GET.get("fromWhere")
+    to_stop = request.GET.get("toWhere")
+    date = request.GET.get("date")
+    bus_company = request.GET.get("busCompany")
+
+    buses = BusModel.objects.all()
+    if date:
+        buses = buses.filter(date=date)
+    if bus_company:
+        buses = buses.filter(busCompany=bus_company)
+
+    valid_buses = []
+    for bus in buses.distinct():
+        route_stops = bus.routes.order_by("stopOrder")
+        stop_names = [stop.stopName for stop in route_stops]
+
+        if from_stop in stop_names and to_stop in stop_names:
+            from_index = stop_names.index(from_stop)
+            to_index = stop_names.index(to_stop)
+            if from_index < to_index:
+                valid_buses.append(bus)
+
+    serializer = BusSerializer(valid_buses, many=True)
+    return Response(serializer.data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def admin_dashboard(request):
+    if not request.user.is_superuser:
+        return Response({"error": "You do not have admin privileges"}, status=status.HTTP_403_FORBIDDEN)
+
+    buses = BusModel.objects.all()
+    routes = RouteModel.objects.all()
+
+    return Response({
+        "buses": BusSerializer(buses, many=True).data,
+        "routes": RouteSerializer(routes, many=True).data
+    })
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def book_seat(request, bus_id):
+    if not request.user.is_customer:
+        return Response({"error": "Only customers can book seats."}, status=status.HTTP_403_FORBIDDEN)
+    seat_number = int(request.data.get("seat_number"))
+    from_stop = request.data.get("from_stop")
+    to_stop = request.data.get("to_stop")
+
+    bus = get_object_or_404(BusModel, id=bus_id)
+    route_stops = bus.routes.order_by("stopOrder")
+    stop_names = [stop.stopName for stop in route_stops]
+
+    from_index = stop_names.index(from_stop) if from_stop in stop_names else None
+    to_index = stop_names.index(to_stop) if to_stop in stop_names else None
+
+    if from_index is None or to_index is None or from_index >= to_index:
+        return Response({"error": "Invalid stops selected."}, status=status.HTTP_400_BAD_REQUEST)
+
+    for stop in route_stops[from_index:to_index]:
+        if seat_number in stop.bookedSeats:
+            return Response({"error": f"Seat {seat_number} is already booked on this route."},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+    ticket = TicketModel.objects.create(
+        customer=request.user.usermodel,
+        bus=bus,
+        seatNumbers=[seat_number],
+        fromStop=from_stop,
+        toStop=to_stop,
+        ticketPrice=bus.perSeatPrice
+    )
+    return Response(
+        {"success": f"Seat {seat_number} booked from {from_stop} to {to_stop}.", "ticket_id": ticket.ticketId},
+        status=status.HTTP_200_OK)
+@api_view(["POST"])
+def cancel_ticket(request, ticket_id):
+    try:
+        ticket = TicketModel.objects.get(ticketId=ticket_id)
+        payment = PaymentModel.objects.filter(ticketId=ticket_id).order_by("-id").first()
+
+        if not payment:
+            return Response({"error": "No payment record found for this ticket."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if payment.paymentStatus == "Cancelled":
+            return Response({"message": "Ticket is already cancelled."}, status=status.HTTP_400_BAD_REQUEST)
+
+        payment.paymentStatus = "Cancelled"
+        payment.save(update_fields=["paymentStatus"])
+
+        ticket.delete()
+        return Response({"message": "Ticket cancelled successfully."}, status=status.HTTP_200_OK)
+
+    except TicketModel.DoesNotExist:
+        return Response({"error": "Ticket not found."}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @api_view(["GET"])
 def SearchBuses(request):
-
     from_stop = request.GET.get("fromWhere")
     to_stop = request.GET.get("toWhere")
     date = request.GET.get("date")
@@ -73,123 +216,8 @@ def SearchBuses(request):
     serializer = BusSerializer(valid_buses, many=True)
     return Response(serializer.data)
 
-
-@api_view(["GET"])
-def bus_company_list(request, company_id):
-    try:
-        company = CompanyModel.objects.get(id=company_id)
-    except CompanyModel.DoesNotExist:
-        raise Http404("Company not found")
-    buses = BusModel.objects.filter(busCompany=company).values("busNo", "fromWhere", "toWhere", "boardingTime", "date")
-
-    return Response({
-        "company": company.busCompany,
-        "noOfBuses": company.noOfBuses,
-        "buses": list(buses)
-    })
-
-@api_view(["POST"])
-def book_seat(request, bus_id):
-    seat_number = int(request.data.get("seat_number"))
-    from_stop = request.data.get("from_stop")
-    to_stop = request.data.get("to_stop")
-
-    bus = get_object_or_404(BusModel, id=bus_id)
-    route_stops = bus.routes.order_by("stopOrder")
-
-    from_index = next((i for i, stop in enumerate(route_stops) if stop.stopName == from_stop), None)
-    to_index = next((i for i, stop in enumerate(route_stops) if stop.stopName == to_stop), None)
-
-    if from_index is None or to_index is None or from_index >= to_index:
-        return Response({"error": "Invalid stops selected."}, status=status.HTTP_400_BAD_REQUEST)
-
-    for stop in route_stops[from_index:to_index]:
-        if seat_number in stop.bookedSeats:
-            return Response({"error": f"Seat {seat_number} is already booked on this route."}, status=status.HTTP_400_BAD_REQUEST)
-
-    for stop in route_stops[from_index:to_index]:
-        stop.bookedSeats.append(seat_number)
-        stop.save()
-
-    if seat_number in bus.availableSeats:
-        bus.availableSeats.remove(seat_number)
-
-    if seat_number not in bus.bookedSeats:
-        bus.bookedSeats.append(seat_number)
-
-    bus.save()
-
-    release_seat_at_stop(bus, seat_number, to_stop)
-
-    return Response({"success": f"Seat {seat_number} booked from {from_stop} to {to_stop}."}, status=status.HTTP_200_OK)
-
-def release_seat_at_stop(bus, seat_number, stop_name):
-    route_stop = bus.routes.filter(stopName=stop_name).first()
-    if route_stop and seat_number in route_stop.bookedSeats:
-        route_stop.bookedSeats.remove(seat_number)
-        route_stop.save()
-    upcoming_stops = bus.routes.filter(stopOrder__gt=route_stop.stopOrder)
-    seat_still_booked = any(seat_number in stop.bookedSeats for stop in upcoming_stops)
-
-    if not seat_still_booked:
-        if seat_number not in bus.availableSeats:
-            bus.availableSeats.append(seat_number)
-
-        if seat_number in bus.bookedSeats:
-            bus.bookedSeats.remove(seat_number)
-
-    bus.save()
-
-
-@api_view(["POST"])
-def cancel_ticket(request, ticket_id):
-    """
-    Cancels a ticket, updates payment status, and releases booked seats.
-    """
-    try:
-        # Fetch the ticket
-        ticket = TicketModel.objects.get(ticketId=ticket_id)
-
-        # Fetch the latest payment record for the ticket
-        payment = PaymentModel.objects.filter(ticketId=ticket).order_by("-id").first()
-        if not payment:
-            return Response({"error": "No payment record found for this ticket."}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Check if the payment is already cancelled
-        if payment.paymentStatus == "Cancelled":
-            return Response({"message": "Ticket is already cancelled."}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Update payment status
-        payment.paymentStatus = "Cancelled"
-        payment.save(update_fields=["paymentStatus"])
-
-        # Fetch the associated bus
-        bus = ticket.bus
-
-        # Release booked seats at stops
-        for seat in ticket.seatNumbers:
-            release_seat_at_stop(bus, seat, ticket.toStop)  # FIX: Replaced dropoffStop with toStop
-
-        # Save the updated bus seat status
-        bus.availableSeats.sort()
-        bus.save(update_fields=["availableSeats", "bookedSeats"])
-
-        return Response({"message": "Ticket and payment cancelled, seats released."}, status=status.HTTP_200_OK)
-
-    except TicketModel.DoesNotExist:
-        return Response({"error": "Ticket not found."}, status=status.HTTP_404_NOT_FOUND)
-
-    except Exception as e:
-        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
 @api_view(["GET"])
 def get_bus_routes(request):
-    bus_id = request.GET.get("bus")
-    if not bus_id:
-        return Response({"error": "Bus ID is required"}, status=400)
-
-    routes = RouteModel.objects.filter(bus_id=bus_id).order_by("stopOrder")
+    routes = RouteModel.objects.all()
     serializer = RouteSerializer(routes, many=True)
-
-    return Response(serializer.data, status=200)
+    return Response(serializer.data, status=status.HTTP_200_OK)

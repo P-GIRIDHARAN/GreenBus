@@ -1,5 +1,6 @@
 from datetime import date
 
+from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
 from GreenBus_App.models import BusModel, UserModel, TicketModel, PaymentModel, CompanyModel, RouteModel
@@ -21,11 +22,14 @@ class CompanySerializer(serializers.ModelSerializer):
         return BusModel.objects.filter(busCompany=obj).count()
 
 
-
+User = get_user_model()
 class UserSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(source="user.username", read_only=True)  # Access from CustomUser
+
     class Meta:
-        model=UserModel
-        fields='__all__'
+        model = UserModel  # Corrected to UserModel
+        fields = ["id", "username", "customerId", "age", "phone_number"]
+
 class RouteSerializer(serializers.ModelSerializer):
     class Meta:
         model=RouteModel
@@ -39,7 +43,7 @@ class TicketSerializer(serializers.ModelSerializer):
 
     def get_paymentStatus(self, obj):
         # Ensure we filter by the correct ticket reference
-        payment = PaymentModel.objects.filter(ticketId=obj.ticketId).order_by('-id').first()
+        payment = PaymentModel.objects.filter(ticket=obj).order_by('-id').first()
         return payment.paymentStatus if payment and payment.paymentStatus else "Pending"
 
     def validate_bookingDate(self, value):
