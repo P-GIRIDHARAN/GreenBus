@@ -2,18 +2,21 @@ from datetime import date
 
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
+from rest_framework.generics import get_object_or_404
 
 from GreenBus_App.models import BusModel, UserModel, TicketModel, PaymentModel, CompanyModel, RouteModel
 
 
 class BusSerializer(serializers.ModelSerializer):
-    busCompanyName = serializers.CharField(source="busCompany.busCompany", read_only=True)
     class Meta:
         model = BusModel
-        fields = [
-            'id', 'busNo','busCompanyName', 'totalSeats', 'availableSeats', 'bookedSeats', 'blockedSeats',
-            'fromWhere', 'toWhere', 'perSeatPrice', 'boardingTime', 'date'
-        ]
+        fields = "__all__"
+    def create(self, validated_data):
+        bus_company_id = validated_data.pop("busCompany")
+        bus_company = get_object_or_404(CompanyModel, id=bus_company_id)
+        validated_data["busCompany"] = bus_company  # Assign actual instance
+        return BusModel.objects.create(**validated_data)
+
 
 class CompanySerializer(serializers.ModelSerializer):
     noOfBuses = serializers.SerializerMethodField()
@@ -51,7 +54,6 @@ class TicketSerializer(serializers.ModelSerializer):
         return payment.paymentStatus if payment and payment.paymentStatus else "Pending"
 
     def validate_bookingDate(self, value):
-        """Ensure bookingDate is not in the past"""
         if value < date.today():
             raise serializers.ValidationError("You cannot book tickets for past dates.")
         return value

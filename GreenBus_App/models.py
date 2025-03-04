@@ -29,7 +29,9 @@ class UserModel(models.Model):
 class CompanyModel(models.Model):
     busCompany = models.CharField(max_length=20)
     noOfBuses = models.PositiveIntegerField(default=0, editable=False)
-
+    class Meta:
+        db_table='Bus Company'
+        ordering=["id"]
     def __str__(self):
         return self.busCompany
 
@@ -48,47 +50,53 @@ class BusModel(models.Model):
     boardingTime = models.CharField(choices=TIME_CHOICES, max_length=10)
     date = models.DateField(default=now)
 
-    def clean(self):
-        """ Validates seat allocations before saving """
-        all_seats = set(range(1, self.totalSeats + 1))
-
-        booked_seats = set(self.bookedSeats or [])
-        blocked_seats = set(self.blockedSeats or [])
-
-        # Ensure no invalid seat numbers exist
-        invalid_seats = (booked_seats | blocked_seats) - all_seats
-        if invalid_seats:
-            raise ValidationError(f"Invalid seat numbers found: {invalid_seats}")
-
-        # Prevent seats from being both booked and blocked
-        overlapping_seats = booked_seats & blocked_seats
-        if overlapping_seats:
-            raise ValidationError(f"Seats cannot be both booked and blocked: {overlapping_seats}")
+    def get_booked_seats(self):
+        if not self.pk:
+            return []  # If bus is not saved, return empty list to avoid querying with unsaved instance
+        booked_tickets = TicketModel.objects.filter(bus=self)
+        booked_seats = []
+        for ticket in booked_tickets:
+            booked_seats.extend(ticket.seatNumbers)
+        return booked_seats
 
     def save(self, *args, **kwargs):
-        """ Updates availableSeats before saving """
-        self.clean()  # Run validation before saving
+        is_new = self.pk is None  # Check if the instance is new
+        super().save(*args, **kwargs)  # Save first to ensure it has a valid primary key
+        if not is_new:  # Only update seats if it's an existing instance
+            self.update_seat_status(save_instance=False)  # Avoid infinite recursion
 
+    def update_seat_status(self, save_instance=True):
+        """Update availableSeats and bookedSeats dynamically based on active tickets."""
+        booked_seats = set(self.get_booked_seats())  # Get seats from active tickets
         all_seats = set(range(1, self.totalSeats + 1))
-        booked_seats = set(self.bookedSeats or [])
-        blocked_seats = set(self.blockedSeats or [])
 
-        # Automatically set availableSeats
-        self.availableSeats = sorted(all_seats - booked_seats - blocked_seats)
+        new_available_seats = sorted(all_seats - booked_seats - set(self.blockedSeats))
 
-        super().save(*args, **kwargs)
+        if self.bookedSeats != booked_seats:
+            self.bookedSeats = sorted(booked_seats)  # Ensure booked seats are updated
 
+        if self.availableSeats != new_available_seats:
+            self.availableSeats = new_available_seats
 
-    def update_seat_status(self):
+        if save_instance:
+            self.save(update_fields=["availableSeats", "bookedSeats"])  # Save only updated fields
+
+    def release_seats(self, seat_numbers):
+        """Remove cancelled seats from bookedSeats and update availableSeats."""
+        booked_seats = set(self.get_booked_seats())  # Get dynamically booked seats
         all_seats = set(range(1, self.totalSeats + 1))
-        booked_seats = set(self.bookedSeats)  # Convert to set
-        blocked_seats = set(self.blockedSeats)  # Convert to set
 
-        available_seats = all_seats - booked_seats - blocked_seats  # Ensure correct set operations
+        # Remove the cancelled seats
+        booked_seats -= set(seat_numbers)
 
-        self.bookedSeats = sorted(booked_seats)  # Store sorted list
-        self.availableSeats = sorted(available_seats)  # Store sorted list
+        # Recalculate available seats
+        new_available_seats = sorted(all_seats - booked_seats - set(self.blockedSeats))
+
+        self.bookedSeats = list(booked_seats)
+        self.availableSeats = new_available_seats
         self.save(update_fields=["bookedSeats", "availableSeats"])
+
+
 
 
 class RouteModel(models.Model):
@@ -100,13 +108,15 @@ class RouteModel(models.Model):
         ordering = ["stopOrder"]
     def __str__(self):
         return f"{self.bus.busNo} - {self.stopName}"
-
+    class Meta:
+        db_table='Bus Routes'
+        ordering=["bus"]
 
 class TicketModel(models.Model):
     ticketId = models.AutoField(primary_key=True)
     customer = models.ForeignKey(UserModel, on_delete=CASCADE)
     bus = models.ForeignKey(BusModel, on_delete=CASCADE)
-    seatNumbers = ArrayField(models.PositiveIntegerField(), blank=True, default=list)
+    seatNumbers = ArrayField(models.IntegerField(), default=list)
     fromStop = models.CharField(max_length=50)
     toStop = models.CharField(max_length=50)
     ticketPrice = models.PositiveIntegerField(default=0, editable=False)
@@ -118,20 +128,24 @@ class TicketModel(models.Model):
     def save(self, *args, **kwargs):
         self.ticketPrice = len(self.seatNumbers) * self.bus.perSeatPrice
         super().save(*args, **kwargs)
-        self.bus.update_seat_status()
+        self.bus.update_seat_status()  # Recalculate booked seats after saving
 
     def delete(self, *args, **kwargs):
-        super().delete(*args, **kwargs)
-        self.bus.update_seat_status()
+        bus = self.bus  # Get reference before deletion
+        super().delete(*args, **kwargs)  # Delete ticket
+        bus.update_seat_status()
 
 
 class PaymentModel(models.Model):
     PAYMENT_CHOICES = [("Pending", "Pending"), ("Paid", "Paid"), ("Cancelled", "Cancelled")]
-    customer = models.ForeignKey(UserModel, on_delete=CASCADE)
-    ticket = models.ForeignKey(TicketModel, on_delete=CASCADE)
+    customer = models.ForeignKey(UserModel, on_delete=models.CASCADE)
+    ticket = models.ForeignKey(TicketModel, on_delete=models.CASCADE)
     paymentStatus = models.CharField(max_length=10, choices=PAYMENT_CHOICES, default="Pending")
 
-    def save(self, *args, **kwargs):
+    def delete(self, *args, **kwargs):
         if self.paymentStatus == "Cancelled":
             self.ticket.delete()
-        super().save(*args, **kwargs)
+        super().delete(*args, **kwargs)
+
+
+
