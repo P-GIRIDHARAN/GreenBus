@@ -1,8 +1,6 @@
 from django.contrib.auth import authenticate, get_user_model
 from django.contrib.auth.hashers import make_password
-from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
-from django.views.decorators.cache import never_cache
 from rest_framework import viewsets, status
 from rest_framework.authtoken.admin import User
 from rest_framework.authtoken.models import Token
@@ -65,10 +63,8 @@ def register_user(request):
 
         user = get_user_model().objects.create(username=username, password=make_password(password))
 
-        # Create UserModel profile
         UserModel.objects.create(user=user, is_customer=True)
 
-        # Generate JWT token
         refresh = RefreshToken.for_user(user)
         access_token = str(refresh.access_token)
 
@@ -94,7 +90,6 @@ def login_view(request):
     user = authenticate(username=username, password=password)
 
     if user:
-        # Generate JWT token
         refresh = RefreshToken.for_user(user)
         access_token = str(refresh.access_token)
 
@@ -254,7 +249,6 @@ def get_bus_routes(request):
     if not bus_id:
         return Response({"error": "Bus ID is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-    # Fetch the routes related to the given bus and order them by stop order
     routes = RouteModel.objects.filter(bus_id=bus_id).order_by("stopOrder")
 
     # Serialize the routes
@@ -277,10 +271,10 @@ def make_payment(request):
         payment, created = PaymentModel.objects.get_or_create(
             customer=ticket.customer,
             ticket=ticket,
-            defaults={"paymentStatus": "Paid"}  # Only set "Paid" if creating a new payment
+            defaults={"paymentStatus": "Paid"}
         )
 
-        if not created:  # If a payment already exists, update its status
+        if not created:
             payment.paymentStatus = "Paid"
             payment.save(update_fields=["paymentStatus"])
 
@@ -288,7 +282,7 @@ def make_payment(request):
             {
                 "message": "Payment successful.",
                 "payment_id": payment.id,
-                "payment_status": payment.paymentStatus,  # Verify status
+                "payment_status": payment.paymentStatus,
             },
             status=status.HTTP_200_OK
         )
@@ -296,8 +290,6 @@ def make_payment(request):
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-class BusModelSerializer:
-    pass
 @api_view(["GET"])
 def customer_search_buses(request):
     from_stop = request.GET.get("fromWhere")
@@ -319,32 +311,25 @@ def customer_search_buses(request):
         route_stops = bus.routes.order_by("stopOrder")
         stop_names = [stop.stopName for stop in route_stops]
 
-        # Check if fromStop and toStop are in the route, and fromStop comes before toStop
         if from_stop in stop_names and to_stop in stop_names:
             from_index = stop_names.index(from_stop)
             to_index = stop_names.index(to_stop)
 
-            # Only include buses where fromStop comes before toStop
             if from_index < to_index:
                 booked_seats = set()
                 all_seats = set(range(1, bus.totalSeats + 1))
 
-                # Accumulate booked seats between fromStop and toStop
                 for stop in route_stops[from_index:to_index]:
                     booked_seats.update(stop.bookedSeats)
 
-                # Handle blocked seats and compute available seats
                 blocked_seats = set(bus.blockedSeats)
                 available_seats = sorted(all_seats - booked_seats - blocked_seats)
 
-                # Assign available and booked seats to the bus instance
                 bus.bookedSeats = list(booked_seats)
                 bus.availableSeats = list(available_seats)
 
-                # Add to valid buses list
                 valid_buses.append(bus)
 
-    # Serialize the valid buses
     serializer = BusSerializer(valid_buses, many=True)
     return Response(serializer.data)
 

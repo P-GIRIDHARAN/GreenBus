@@ -48,21 +48,36 @@ class BusModel(models.Model):
     boardingTime = models.CharField(choices=TIME_CHOICES, max_length=10)
     date = models.DateField(default=now)
 
-    def save(self, *args, **kwargs):
+    def clean(self):
+        """ Validates seat allocations before saving """
         all_seats = set(range(1, self.totalSeats + 1))
 
-        # Ensure bookedSeats and blockedSeats are not None before converting to sets
         booked_seats = set(self.bookedSeats or [])
         blocked_seats = set(self.blockedSeats or [])
 
-        # Ensure there is no invalid seat number
-        invalid_seats = booked_seats | blocked_seats - all_seats
+        # Ensure no invalid seat numbers exist
+        invalid_seats = (booked_seats | blocked_seats) - all_seats
         if invalid_seats:
             raise ValidationError(f"Invalid seat numbers found: {invalid_seats}")
 
+        # Prevent seats from being both booked and blocked
+        overlapping_seats = booked_seats & blocked_seats
+        if overlapping_seats:
+            raise ValidationError(f"Seats cannot be both booked and blocked: {overlapping_seats}")
+
+    def save(self, *args, **kwargs):
+        """ Updates availableSeats before saving """
+        self.clean()  # Run validation before saving
+
+        all_seats = set(range(1, self.totalSeats + 1))
+        booked_seats = set(self.bookedSeats or [])
+        blocked_seats = set(self.blockedSeats or [])
+
+        # Automatically set availableSeats
         self.availableSeats = sorted(all_seats - booked_seats - blocked_seats)
 
         super().save(*args, **kwargs)
+
 
     def update_seat_status(self):
         all_seats = set(range(1, self.totalSeats + 1))

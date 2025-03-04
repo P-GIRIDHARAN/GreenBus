@@ -7,10 +7,11 @@ from GreenBus_App.models import BusModel, UserModel, TicketModel, PaymentModel, 
 
 
 class BusSerializer(serializers.ModelSerializer):
+    busCompanyName = serializers.CharField(source="busCompany.busCompany", read_only=True)
     class Meta:
         model = BusModel
         fields = [
-            'id', 'busNo','busCompany', 'totalSeats', 'availableSeats', 'bookedSeats', 'blockedSeats',
+            'id', 'busNo','busCompanyName', 'totalSeats', 'availableSeats', 'bookedSeats', 'blockedSeats',
             'fromWhere', 'toWhere', 'perSeatPrice', 'boardingTime', 'date'
         ]
 
