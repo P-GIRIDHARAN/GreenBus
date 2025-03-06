@@ -10,13 +10,7 @@ from GreenBus_App.models import BusModel, UserModel, TicketModel, PaymentModel, 
 class BusSerializer(serializers.ModelSerializer):
     class Meta:
         model = BusModel
-        fields = "__all__"
-    def create(self, validated_data):
-        bus_company_id = validated_data.pop("busCompany")
-        bus_company = get_object_or_404(CompanyModel, id=bus_company_id)
-        validated_data["busCompany"] = bus_company  # Assign actual instance
-        return BusModel.objects.create(**validated_data)
-
+        exclude = ['bookedSeats','blockedSeats']
 
 class CompanySerializer(serializers.ModelSerializer):
     noOfBuses = serializers.SerializerMethodField()
@@ -27,7 +21,6 @@ class CompanySerializer(serializers.ModelSerializer):
 
     def get_noOfBuses(self, obj):
         return BusModel.objects.filter(busCompany=obj).count()
-
 
 User = get_user_model()
 class UserSerializer(serializers.ModelSerializer):

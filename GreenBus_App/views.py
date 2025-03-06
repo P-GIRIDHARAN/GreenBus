@@ -23,7 +23,7 @@ class CompanyViewSet(viewsets.ModelViewSet):
 class BusViewSet(viewsets.ModelViewSet):
     queryset = BusModel.objects.all()
     serializer_class = BusSerializer
-    permission_classes=[IsAdminUser]
+    permission_classes = [IsAuthenticated]  # Allows any logged-in user
 
 
 class UserViewSet(viewsets.ModelViewSet):
@@ -105,16 +105,179 @@ def login_view(request):
 
     return Response({"error": "Invalid credentials"}, status=status.HTTP_400_BAD_REQUEST)
 
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def get_available_seats(request):
+    """
+    Fetches the available seats for a bus journey between two stops.
+    """
+    bus_id = request.data.get("busId")
+    from_where = request.data.get("fromWhere")
+    to_where = request.data.get("toWhere")
+
+    if not bus_id:
+        return Response({"error": "busId is required."}, status=400)
+    if not from_where or not to_where:
+        return Response({"error": "Both fromWhere and toWhere are required."}, status=400)
+
+    try:
+        bus = BusModel.objects.get(id=bus_id)
+    except BusModel.DoesNotExist:
+        return Response({"error": "Bus not found."}, status=404)
+
+    # Fetch the ordered route stops
+    route_stops = bus.routes.order_by("stopOrder")
+    stop_names = [stop.stopName for stop in route_stops]
+
+    if from_where not in stop_names or to_where not in stop_names:
+        return Response({"error": "Invalid stops selected."}, status=400)
+
+    from_index = stop_names.index(from_where)
+    to_index = stop_names.index(to_where)
+
+    if from_index >= to_index:
+        return Response({"error": "Invalid journey selection."}, status=400)
+
+    booked_seats = set(bus.get_booked_seats(from_where, to_where))
+    blocked_seats = set(bus.blockedSeats)
+    all_seats = set(range(1, bus.totalSeats + 1))
+
+    # Available seats = Total seats - booked seats (for this segment) - blocked seats
+    available_seats = sorted(all_seats - booked_seats - blocked_seats)
+
+    return Response({
+        "busId": bus.id,
+        "fromWhere": from_where,
+        "toWhere": to_where,
+        "availableSeats": available_seats
+    })
+
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
-def admin_dashboard(request):
-    if not request.user.is_superuser:
-        return Response({"error": "You do not have admin privileges"}, status=status.HTTP_403_FORBIDDEN)
+def customer_search_buses(request):
+    """Search available buses between two stops with correct seat availability."""
+    from_stop = request.GET.get("fromWhere")
+    to_stop = request.GET.get("toWhere")
+    date = request.GET.get("date")
+    bus_company = request.GET.get("busCompany")
 
-    # Your business logic
-    return Response({"message": "Welcome to the admin dashboard"})
+    buses = BusModel.objects.all()
+    if date:
+        buses = buses.filter(date=date)
+    if bus_company:
+        buses = buses.filter(busCompany=bus_company)
+
+    valid_buses = []
+
+    for bus in buses.distinct():
+        route_stops = bus.routes.order_by("stopOrder")
+        stop_names = [stop.stopName for stop in route_stops]
+
+        if from_stop in stop_names and to_stop in stop_names:
+            from_index = stop_names.index(from_stop)
+            to_index = stop_names.index(to_stop)
+
+            if from_index < to_index:
+                booked_seats = set(bus.get_booked_seats(from_stop, to_stop))
+                blocked_seats = set(bus.blockedSeats)
+                all_seats = set(range(1, bus.totalSeats + 1))
+
+                bus.availableSeats = sorted(all_seats - booked_seats - blocked_seats)
+                bus.bookedSeats = sorted(booked_seats)
+
+                valid_buses.append(bus)
+
+    serializer = BusSerializer(valid_buses, many=True)
+    return Response(serializer.data)
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def customer_book_seat(request):
+    try:
+        user = request.user
+        user_model = UserModel.objects.filter(user=user).first()
+
+        if not user_model:
+            return Response({"error": "Only registered customers can book seats."}, status=status.HTTP_403_FORBIDDEN)
+
+        bus_id = request.data.get("bus_id")
+        seat_numbers = request.data.get("seat_numbers", [])
+        from_stop = request.data.get("from_stop")
+        to_stop = request.data.get("to_stop")
+
+        if not bus_id:
+            return Response({"error": "Bus ID is required."}, status=status.HTTP_400_BAD_REQUEST)
+        if not seat_numbers:
+            return Response({"error": "At least one seat must be selected."}, status=status.HTTP_400_BAD_REQUEST)
+        if not from_stop or not to_stop:
+            return Response({"error": "Both from_stop and to_stop are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            bus = get_object_or_404(BusModel.objects.select_for_update(), id=bus_id)
+            route_stops = bus.routes.order_by("stopOrder")
+            stop_names = [stop.stopName for stop in route_stops]
+
+            if from_stop not in stop_names or to_stop not in stop_names:
+                return Response({"error": "Invalid stops selected."}, status=status.HTTP_400_BAD_REQUEST)
+
+            from_index = stop_names.index(from_stop)
+            to_index = stop_names.index(to_stop)
+
+            if from_index >= to_index:
+                return Response({"error": "Invalid journey selection."}, status=status.HTTP_400_BAD_REQUEST)
+
+            # **Fix: Check seat availability only for the requested segment**
+            booked_seats = set()
+            for stop in route_stops:
+                if from_index <= stop.stopOrder < to_index:
+                    booked_seats.update(stop.bookedSeats)
+
+            blocked_seats = set(bus.blockedSeats)
+
+            # Ensure no selected seat is already booked
+            already_booked = [seat for seat in seat_numbers if seat in booked_seats]
+            if already_booked:
+                return Response({"error": f"Seats {already_booked} are already booked."}, status=status.HTTP_400_BAD_REQUEST)
+
+            blocked = [seat for seat in seat_numbers if seat in blocked_seats]
+            if blocked:
+                return Response({"error": f"Seats {blocked} are blocked and cannot be booked."}, status=status.HTTP_400_BAD_REQUEST)
+
+            # **Update RouteModel to mark the seats as booked for the specific segment**
+            for stop in route_stops:
+                if from_index <= stop.stopOrder < to_index:
+                    stop.bookedSeats = list(set(stop.bookedSeats) | set(seat_numbers))
+                    stop.save(update_fields=["bookedSeats"])
+
+            # Create the ticket
+            ticket = TicketModel.objects.create(
+                customer=user_model,
+                bus=bus,
+                seatNumbers=seat_numbers,
+                fromStop=from_stop,
+                toStop=to_stop,
+            )
+
+        return Response(
+            {
+                "message": "Seat(s) booked successfully.",
+                "ticket_details": {
+                    "ticket_id": ticket.ticketId,
+                    "bus_no": bus.busNo,
+                    "bus_company": bus.busCompany.busCompany,
+                    "seat_numbers": seat_numbers,
+                    "from_stop": from_stop,
+                    "to_stop": to_stop,
+                    "journey_date": bus.date.strftime("%Y-%m-%d"),
+                    "price": ticket.ticketPrice,
+                },
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    except Exception as e:
+        return Response({"error": f"Booking failed: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -146,49 +309,6 @@ def cancel_ticket(request):
 
     except Exception as e:
         return Response({"error": f"Cancellation failed: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-@api_view(["GET"])
-@permission_classes([AllowAny])
-def SearchBuses(request):
-    from_stop = request.GET.get("fromWhere")
-    to_stop = request.GET.get("toWhere")
-    date = request.GET.get("date")
-    bus_company = request.GET.get("busCompany")
-
-    buses = BusModel.objects.all()
-    if date:
-        buses = buses.filter(date=date)
-    if bus_company:
-        buses = buses.filter(busCompany=bus_company)
-
-    valid_buses = []
-
-    for bus in buses.distinct():
-        route_stops = bus.routes.order_by("stopOrder")
-        stop_names = [stop.stopName for stop in route_stops]
-
-        if from_stop in stop_names and to_stop in stop_names:
-            from_index = stop_names.index(from_stop)
-            to_index = stop_names.index(to_stop)
-
-            if from_index < to_index:
-                booked_seats = set()
-                all_seats = set(range(1, bus.totalSeats + 1))
-
-                for stop in route_stops[from_index:to_index]:
-                    booked_seats.update(stop.bookedSeats)
-
-                blocked_seats = set(bus.blockedSeats)
-                available_seats = sorted(all_seats - booked_seats - blocked_seats)
-
-                bus.bookedSeats = list(booked_seats)
-                bus.availableSeats = list(available_seats)
-
-                valid_buses.append(bus)
-
-    serializer = BusSerializer(valid_buses, many=True)
-    return Response(serializer.data)
-
 
 @api_view(["POST"])
 def get_bus_routes(request):
@@ -270,135 +390,6 @@ def make_payment(request):
 
     except Exception as e:
         return Response({"error": f"Payment failed: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-@api_view(["GET"])
-def customer_search_buses(request):
-    from_stop = request.GET.get("fromWhere")
-    to_stop = request.GET.get("toWhere")
-    date = request.GET.get("date")
-    bus_company = request.GET.get("busCompany")
-
-    buses = BusModel.objects.all()
-
-    # Apply filters for date and bus company
-    if date:
-        buses = buses.filter(date=date)
-    if bus_company:
-        buses = buses.filter(busCompany=bus_company)
-
-    valid_buses = []
-
-    for bus in buses.distinct():
-        route_stops = bus.routes.order_by("stopOrder")
-        stop_names = [stop.stopName for stop in route_stops]
-
-        if from_stop in stop_names and to_stop in stop_names:
-            from_index = stop_names.index(from_stop)
-            to_index = stop_names.index(to_stop)
-
-            if from_index < to_index:
-                booked_seats = set()
-                all_seats = set(range(1, bus.totalSeats + 1))
-
-                for stop in route_stops[from_index:to_index]:
-                    if isinstance(stop.bookedSeats, list):
-                        booked_seats.update(stop.bookedSeats)  # Add list elements
-                    else:
-                        booked_seats.add(stop.bookedSeats)  # Add single integer
-
-                blocked_seats = set(bus.blockedSeats)
-                available_seats = sorted(all_seats - booked_seats - blocked_seats)
-
-                # Ensure latest seat status is saved
-                bus.availableSeats = available_seats
-                bus.bookedSeats = list(booked_seats)
-                bus.save(update_fields=["availableSeats", "bookedSeats"])
-
-                valid_buses.append(bus)
-
-    serializer = BusSerializer(valid_buses, many=True)
-    return Response(serializer.data)
-
-
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
-def customer_book_seat(request):
-    try:
-        user = request.user
-        user_model = getattr(user, "profile", None)
-
-        if not user_model:
-            return Response({"error": "Only registered customers can book seats."}, status=status.HTTP_403_FORBIDDEN)
-
-        bus_id = request.data.get("bus_id")
-        seat_numbers = request.data.get("seat_numbers", [])
-        from_stop = request.data.get("from_stop")
-        to_stop = request.data.get("to_stop")
-
-        if not bus_id:
-            return Response({"error": "Bus ID is required."}, status=status.HTTP_400_BAD_REQUEST)
-        if not seat_numbers:
-            return Response({"error": "At least one seat must be selected."}, status=status.HTTP_400_BAD_REQUEST)
-        if not from_stop or not to_stop:
-            return Response({"error": "Both from_stop and to_stop are required."}, status=status.HTTP_400_BAD_REQUEST)
-
-        with transaction.atomic():
-            bus = get_object_or_404(BusModel.objects.select_for_update(), id=bus_id)
-            route_stops = bus.routes.order_by("stopOrder")
-            stop_names = [stop.stopName for stop in route_stops]
-
-            if from_stop not in stop_names or to_stop not in stop_names:
-                return Response({"error": "Invalid stops selected."}, status=status.HTTP_400_BAD_REQUEST)
-
-            from_index = stop_names.index(from_stop)
-            to_index = stop_names.index(to_stop)
-
-            if from_index >= to_index:
-                return Response({"error": "Invalid journey selection."}, status=status.HTTP_400_BAD_REQUEST)
-
-            booked_seats = set(bus.get_booked_seats())
-            blocked_seats = set(bus.blockedSeats)
-
-            already_booked = [seat for seat in seat_numbers if seat in booked_seats]
-            if already_booked:
-                return Response({"error": f"Seats {already_booked} are already booked."}, status=status.HTTP_400_BAD_REQUEST)
-
-            blocked = [seat for seat in seat_numbers if seat in blocked_seats]
-            if blocked:
-                return Response({"error": f"Seats {blocked} are blocked and cannot be booked."}, status=status.HTTP_400_BAD_REQUEST)
-
-            ticket = TicketModel.objects.create(
-                customer=user_model,
-                bus=bus,
-                seatNumbers=seat_numbers,
-                fromStop=from_stop,
-                toStop=to_stop,
-            )
-
-            bus.bookedSeats = list(set(bus.get_booked_seats()) | set(seat_numbers))  # Ensure proper set union
-            bus.availableSeats = list(set(bus.availableSeats) - set(seat_numbers))
-            bus.save(update_fields=["availableSeats", "bookedSeats"])
-
-        return Response(
-            {
-                "message": "Seat(s) booked successfully.",
-                "ticket_details": {
-                    "ticket_id": ticket.ticketId,
-                    "bus_no": bus.busNo,
-                    "bus_company": bus.busCompany.busCompany,
-                    "seat_numbers": seat_numbers,
-                    "from_stop": from_stop,
-                    "to_stop": to_stop,
-                    "journey_date": bus.date.strftime("%Y-%m-%d"),
-                    "price": ticket.ticketPrice,
-                },
-            },
-            status=status.HTTP_201_CREATED,
-        )
-
-    except Exception as e:
-        return Response({"error": f"Booking failed: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(["GET"])
