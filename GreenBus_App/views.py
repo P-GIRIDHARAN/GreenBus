@@ -191,6 +191,16 @@ def customer_search_buses(request):
     serializer = BusSerializer(valid_buses, many=True)
     return Response(serializer.data)
 
+from django.db import transaction
+from django.shortcuts import get_object_or_404
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework import status
+from channels.layers import get_channel_layer
+from asgiref.sync import async_to_sync
+from GreenBus_App.models import BusModel, TicketModel, UserModel
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def customer_book_seat(request):
@@ -227,7 +237,7 @@ def customer_book_seat(request):
             if from_index >= to_index:
                 return Response({"error": "Invalid journey selection."}, status=status.HTTP_400_BAD_REQUEST)
 
-            # **Fix: Check seat availability only for the requested segment**
+            # **Check seat availability only for the requested segment**
             booked_seats = set()
             for stop in route_stops:
                 if from_index <= stop.stopOrder < to_index:
@@ -259,6 +269,19 @@ def customer_book_seat(request):
                 toStop=to_stop,
             )
 
+            channel_layer = get_channel_layer()
+            async_to_sync(channel_layer.group_send)(
+                f"bus_{bus_id}",
+                {
+                    "type": "seat_update",
+                    "data": {
+                        "bus_id": bus_id,
+                        "booked_seats": list(booked_seats | set(seat_numbers)),
+                        "message": f"Seats {seat_numbers} booked successfully",
+                    },
+                },
+            )
+
         return Response(
             {
                 "message": "Seat(s) booked successfully.",
@@ -278,6 +301,7 @@ def customer_book_seat(request):
 
     except Exception as e:
         return Response({"error": f"Booking failed: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
